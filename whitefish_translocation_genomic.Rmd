@@ -267,4 +267,51 @@ write.table(contrib1$var.names, "blacklist_adegenet.txt", row.names = FALSE)
 
 The loci in the files `blacklist_snprelate.txt` and `blacklist_adegenet.txt` are then combined and used as blasklist loci in `populations`.
 
+#### Generate vcf file
+
+Here we are generating a vcf file for the Eck and Lomond systems combined (for the selection analyses and PCA), and for each system separately.
+
+```{bash, eval = FALSE}
+# for the combined dataset
+populations -P ./05.Stacks -O ./05.Stacks/combined -M ./popmap_translocation_combined.txt -B ./05.Stacks/blacklist_loci.txt -t 4 -p 6 -r 0.75 --min-maf 0.05 --max-obs-het 0.6 --write_single_snp --vcf
+
+# for the Lomond system
+populations -P ./05.Stacks -O ./05.Stacks/lomond -M ./popmap_translocation_lom.txt -B ./05.Stacks/blacklist_loci.txt -t 4 -p 4 -r 0.75 --min-maf 0.05 --max-obs-het 0.6 --write_single_snp --vcf
+
+# for the Eck system
+populations -P ./05.Stacks -O .0/5.Stacks/eck -M ./popmap_translocation_eck.txt -B ../05.Stacks/blacklist_loci.txt -t 4 -p 2 -r 0.75 --min-maf 0.05 --max-obs-het 0.6 --write_single_snp --vcf
+```
+
+##### Filter the vcf file
+
+Here we are using vcftools to further filter the vcf file: minimum SNP depth of 5, minimum mean SNP depth of 8, maximum mean depth of 40, maf of 0.05, 67% of individuals need to have the site.
+
+```{bash, eval = FALSE}
+vcftools --vcf ./05.Stacks/populations.snps.vcf --minDP 5 --min-meanDP 8 --max-meanDP 40 --maf 0.05 --max-missing 0.667 --recode --recode-INFO-all --out ./05.Stacks/filtered
+```
+
+Then we exclude individuals with more than 30% missing data
+
+```{bash, eval = FALSE}
+vcftools --vcf filtered.recode.vcf --missing-indv
+
+mawk '$5 > 0.3' out.imiss | cut -f1 > lowDP.indv
+
+vcftools --vcf filtered.recode.vcf --remove lowDP.indv --recode --recode-INFO-all --out comb.filt
+
+```
+
+We then use the `filter_hwe_by_pop.pl` script from the [dDocent](http://www.ddocent.com/) pipeline. This script removes sites that are not in HWE within populations.
+
+```{bash, eval = FALSE}
+./filter_hwe_by_pop.pl -v comb.filt.recode.vcf -p popmap_translocation_combined.txt -o combined.hwe
+```
+
+Finally, we use the `pop_missing_filter.sh` script from the [dDocent](http://www.ddocent.com/) pipeline. This script remove sites missing in a user-chosen threshold of individuals per population.
+
+```{bash, eval = FALSE}
+# filter by missing data per population
+./pop_missing_filter.sh combined.hwe.recode.vcf popmap_translocation_combined.txt 0.33 1 combined
+```
+
 

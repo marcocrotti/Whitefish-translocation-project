@@ -1,0 +1,285 @@
+Whitefish translocation: genomic analyses
+================
+Marco Crotti
+30 May, 2020
+
+  - [Genomic pipeline for the whitefish translocation
+    project](#genomic-pipeline-for-the-whitefish-translocation-project)
+      - [Set up working environment](#set-up-working-environment)
+      - [Preparing the data for population genomics
+        analyses](#preparing-the-data-for-population-genomics-analyses)
+          - [01. Demultiplex raw reads](#demultiplex-raw-reads)
+          - [02. <span>Trimmomatic</span>
+            filtering](#trimmomatic-filtering)
+          - [03. Align to European whitefish genome
+            assembly](#align-to-european-whitefish-genome-assembly)
+          - [04. Build Stacks catalog](#build-stacks-catalog)
+      - [Start with the genomic
+        analyses](#start-with-the-genomic-analyses)
+          - [Preliminary PCA to check the data and identify batch effect
+            loci](#preliminary-pca-to-check-the-data-and-identify-batch-effect-loci)
+
+## Genomic pipeline for the whitefish translocation project
+
+### Set up working environment
+
+Let’s create the folders that are going to contain the output data from
+all the pipeline components.
+
+``` bash
+mkdir ./Desktop/translocation
+mkdir ./Desktop/translocation/00.Raw_reads ./Desktop/translocation/01.Demultiplexed_reads ./Desktop/translocation/02.Trimmomatic_filtering ./Desktop/translocation/03.Assembly ./Desktop/translocation/04.bam_alignments ./Desktop/translocation/05.Stacks ./Desktop/translocation/07.Selection_analyses
+```
+
+### Preparing the data for population genomics analyses
+
+We are going to demultiplex raw reads, filter low reads out, align to
+reference genome, and build a STACKS catalog.
+
+#### 01\. Demultiplex raw reads
+
+Use
+[process\_radtags](http://catchenlab.life.illinois.edu/stacks/comp/process_radtags.php)
+to demultiplex Illumina raw data.
+
+``` bash
+process_radtags -P -c -q -r -p ./00.Raw_reads/ -o ./01.Demultiplexed_reads -b ./translocation_barcodes.txt --inline_inline -i gzfastq -y gzfastq --renz_1 pstI --renz_2 mspI -t 65
+```
+
+#### 02\. [Trimmomatic](http://www.usadellab.org/cms/?page=trimmomatic) filtering
+
+Remove the first 5 bp and 3 bp from the forward and reverse reads to
+remove the enzyme cut site, single end reads.
+
+``` bash
+# Forward reads
+for infile in ./01.Demultiplexed_reads/*.1.fq.gz
+do
+base=$(basename $infile .fq.gz)
+java -jar /usr/local/bin/trimmomatic-0.38.jar SE -threads 4 $infile ./02.Trimmomatic_filtering/$base.fq.gz HEADCROP:5
+done
+
+# Reverse reads
+for infile in ./01.Demultiplexed_reads/*.2.fq.gz
+do
+base=$(basename $infile .fq.gz)
+java -jar /usr/local/bin/trimmomatic-0.38.jar SE -threads 4 $infile ./02.Trimmomatic_filtering/$base.fq.gz HEADCROP:3
+done
+```
+
+Do paired-end filtering.
+
+``` bash
+for R1 in *.1.fq.gz
+do
+R2=${R1//1.fq.gz/2.fq.gz}
+R1paired=${R1//.1.fq.gz/.P1.fq.gz}
+R1unpaired=${R1//.1.fq.gz/.U1.fq.gz}    
+R2paired=${R2//.2.fq.gz/.P2.fq.gz}
+R2unpaired=${R2//.2.fq.gz/.U2.fq.gz}
+echo "$R1 $R2"
+java -jar /usr/local/bin/trimmomatic-0.38.jar PE -threads 4 -phred33 $R1 $R2 ./02.Trimmomatic_filtering/$R1paired $R1unpaired ./02.Trimmomatic_filtering/$R2paired $R2unpaired LEADING:20 TRAILING:20 MINLEN:60
+done
+```
+
+#### 03\. Align to European whitefish genome assembly
+
+We are using [bwa](http://bio-bwa.sourceforge.net/) aligner for short
+reads.
+
+``` bash
+for R1 in ./02.Trimmomatic_filtering/*.P1.fq.gz
+do
+R2=${R1//.P1.fq.gz/.P2.fq.gz}
+base=$(basename $R1 .P1.fq.gz)
+echo "$base"
+bwa mem -t 4 /03.Assembly/EW_genome.fasta.gz $R1 $R2 | samtools view -bSq 20 | \
+samtools sort -o ./04.bam_alignments/$base.bam
+done
+
+# index the bam files
+for bam in ./04.bam_alignments/*.bam
+do
+base=$(basename $bam .bam)
+echo "$base"
+samtools index ./04.bam_alignments/$base.bam
+done
+```
+
+#### 04\. Build Stacks catalog
+
+For this project we used [STACKS
+v.2.4.1](http://catchenlab.life.illinois.edu/stacks/). We are using the
+`ref_map.pl` script to build a catalog with referenced aligned reads.
+
+``` bash
+ref_map.pl -T 4 --samples ./04.bam_alignments/ -o ./05.Stacks --popmap ./popmap_translocation.txt
+```
+
+### Start with the genomic analyses
+
+#### Preliminary PCA to check the data and identify batch effect loci
+
+Let’s generate a vcf and structure dataset in `populations`:
+
+``` bash
+populations -P ./05.Stacks -O ./5.Stacks/batch_effect -M ./popmap_translocation.txt -t 4 -p 6 -r 0.667 --min-maf 0.05 --max-obs-het 0.6 --write_single_snp --structure --vcf
+```
+
+Now let’s use use the `R` packages `SNPRelate` (a good vignette is found
+[here](http://corearray.sourceforge.net/tutorials/SNPRelate/)) and
+`adegenet` ([here](http://adegenet.r-forge.r-project.org/)) to run PCA
+and identify loci associated with the axis explaining the batch effect.
+
+``` r
+library(adegenet);library(SNPRelate);library(tidyverse)
+
+setwd("~/Desktop/ddRAD_epiRAD_powan/demultiplexed_reads/EpiRAD/Intermediate_files3/5.Stacks_ref/batch_effect")
+
+
+# SNPRelate ----
+
+# Functions ----
+
+# Consistent plot aesthetics for PCA
+theme.pca <- function() {
+  theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.background = element_rect(colour="black",fill="white", size=1),
+          axis.text = element_text(size=16, color = "black"),
+          axis.ticks = element_line(size = 0.5, colour = "black"),
+          axis.ticks.length = unit(3, "mm"),
+          axis.title.y = element_text(size = 30),
+          axis.title.x = element_text(size = 30),
+          axis.text.x = element_text(size=20),
+          axis.text.y = element_text(size=20),
+          legend.title = element_text(size = 20),
+          legend.text = element_text(size = 20))
+}
+
+
+
+# Import vcf file and popdata file ----
+vcf.fn <- "populations.snps.vcf"
+snpgdsVCF2GDS(vcf.fn, "test.gds", method="biallelic.only")
+snpgdsSummary("test.gds")
+genofile <- snpgdsOpen("test.gds")
+
+
+pop_data <- read.table("~/Desktop/ddRAD_epiRAD_powan/demultiplexed_reads/EpiRAD/Intermediate_files3/popmap_ddRAD_epiRAD.txt",header=FALSE)
+
+pop_data <- pop_data %>% 
+  mutate(Library = ifelse(grepl("ELT", V1), "epiRAD", "ddRAD"))
+
+# Start analysis ----
+set.seed(1000)  # for reproducibility
+
+# pca with all SNPs
+pca <- snpgdsPCA(genofile, num.thread=2, autosome.only = FALSE)  # 
+
+# variance proportion (%)
+pc.percent <- pca$varprop*100
+head(round(pc.percent, 2))
+
+# Manipulate results ----
+tab <- data.frame(sample.id = pca$sample.id,
+                  EV1 = pca$eigenvect[,1],  # the first eigenvector
+                  EV2 = pca$eigenvect[,2],  # the second eigenvector
+                  EV3 = pca$eigenvect[,3],  # the third eigenvector
+                  EV4 = pca$eigenvect[,4],
+                  EV5 = pca$eigenvect[,5],
+                  stringsAsFactors = FALSE)
+head(tab)
+
+
+# add population data
+tab[,7] <- pop_data$V2
+tab[,8] <- pop_data$Library
+colnames(tab)[7] <- "Lake"
+colnames(tab)[8] <- "Library"
+
+# recode lake names
+lakes_renamed <- recode(tab$Lake, gla = "Glashan", tar = "Tarsan", eck = "Eck", lai = "Allt na lairige", 
+                        shi = "Shira", car = "Carron", sloy = "Sloy", lom = "Lomond")
+tab[,7] <- lakes_renamed
+
+# Plot results
+cols <- c("Allt na lairige"="#a4dede","Carron"="#008396","Eck"="gray60","Glashan"="#9b2915","Lomond"="gray60","Shira"="#287c71",
+          "Sloy"="#6c966f","Tarsan"="#fe7c73")
+tab$Lake <- factor(tab$Lake,levels = c("Glashan", "Tarsan","Eck","Allt na lairige", "Carron","Shira","Sloy","Lomond"))
+
+
+# PC1 and PC2
+pdf(file = "~/Dropbox/Marco_Crotti/Evolutionary genomics of whitefish/Translocation project/Genomic analyses/figures/batch_effect_12.pdf", width = 11.69, height = 8.27)
+ggplot(tab, aes(x = EV1, y = EV2, colour = Library)) + geom_point(size=6, alpha=0.85) +
+  theme.pca() + labs(x="EV1 17.66%", y="EV2 1.713%") +
+  geom_vline(xintercept = 0, linetype = 'dashed') + geom_hline(yintercept = 0, linetype = 'dashed') + geom_text(aes(label=sample.id),hjust=0, vjust=0)
+dev.off()
+
+# PC1 and PC3
+pdf(file = "~/Dropbox/Marco_Crotti/Evolutionary genomics of whitefish/Translocation project/Genomic analyses/figures/batch_effect_13.pdf", width = 11.69, height = 8.27)
+ggplot(tab, aes(x = EV1, y = EV3,col = Library)) + geom_point(size=6, alpha=0.85) +
+  theme.pca() + labs(x="EV1 17.66%", y="EV3 1.14%") +
+  geom_vline(xintercept = 0, linetype = 'dashed') + geom_hline(yintercept = 0, linetype = 'dashed') + geom_text(aes(label=sample.id),hjust=0, vjust=0)
+dev.off()
+
+# Calculate SNP loadings ----
+
+SnpLoad <- snpgdsPCASNPLoading(pca, genofile, num.thread=1L, verbose=TRUE)
+
+plot(SnpLoad$snploading[2,], type="h", ylab="PC 1")
+
+snp_loadings <- as.data.frame(t(SnpLoad$snploading[1:3,]))
+chr <- read.gdsn(index.gdsn(genofile, "snp.chromosome"))
+snp_loadings[,4] <- SnpLoad$snp.id
+snp_loadings[,5] <- chr
+snp_loadings[,6] <- locus_id
+
+
+colnames(snp_loadings)[1:5] <- c("EV1","EV2","EV3","SNP_ID","chr")
+
+# To calculate the SNP correlations between eigenvactors and SNP genotypes:
+# Get chromosome index
+chr <- read.gdsn(index.gdsn(genofile, "snp.chromosome"))
+chr2 <- parse_number(chr)
+CORR <- snpgdsPCACorr(pca, genofile, eig.which=1:4)
+
+savepar <- par(mfrow=c(3,1), mai=c(0.3, 0.55, 0.1, 0.25))
+for (i in 1:3)
+{
+  plot(abs(CORR$snpcorr[i,]), ylim=c(0,1), xlab="", ylab=paste("PC", i),
+       col=chr2, pch="+")
+}
+
+locus_id <- read.table("locus_name.txt",header=TRUE)
+corr_table <- data.frame(t(CORR$snpcorr))
+corr_table[,5] <- locus_id$ID
+outliers <- filter(corr_table, X2 >= 0.3)
+
+write.table(outliers$V5, "blacklist_snprelate.txt", row.names = FALSE)
+
+# Adegenet analysis ----
+genind1 <- read.structure("populations.str", n.ind = 213, n.loc = 16720, 
+                          onerowperind = FALSE, col.lab = 1, 
+                          NA.char = "0", ask = FALSE, 
+                          row.marknames = 1, quiet = FALSE) 
+
+
+X <- scaleGen(genind1, NA.method="mean")
+class(X)
+pca1 <- dudi.pca(X,cent=TRUE,scale=TRUE,scannf=TRUE,nf=3)
+s.label(pca1$li,xax=1, yax=2)
+pca1$eig
+
+
+contrib1 <- loadingplot(pca1$co, axis=2,
+                        thres=.3, lab.jitter=1)
+
+
+write.table(contrib1$var.names, "blacklist_adegenet.txt", row.names = FALSE)
+```
+
+The loci in the files `blacklist_snprelate.txt` and
+`blacklist_adegenet.txt` are then combined and used as blasklist loci in
+`populations`.
